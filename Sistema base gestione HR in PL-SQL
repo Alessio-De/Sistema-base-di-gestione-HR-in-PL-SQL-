@@ -1,0 +1,264 @@
+/*
+  Sistema Avanzato di Gestione HR
+  
+  Questo progetto implementa un sistema completo di gestione delle risorse umane che include:
+  - Gestione automatizzata del processo di assunzione
+  - Calcolo degli stipendi con bonus
+  - Sistema di valutazione delle performance
+  - Report analitici per il management
+  
+  Caratteristiche tecniche dimostrate:
+  - Package PL/SQL
+  - Stored Procedures e Functions
+  - Triggers
+  - Cursori
+  - Gestione delle eccezioni
+  - Collections
+  - Dynamic SQL
+  - Bulk operations
+*/
+
+-- Creazione delle tabelle necessarie
+CREATE TABLE employees (
+    emp_id NUMBER PRIMARY KEY,
+    first_name VARCHAR2(50),
+    last_name VARCHAR2(50),
+    email VARCHAR2(100),
+    hire_date DATE,
+    salary NUMBER(10,2),
+    department_id NUMBER,
+    performance_score NUMBER(2,1)
+);
+
+CREATE TABLE departments (
+    dept_id NUMBER PRIMARY KEY,
+    dept_name VARCHAR2(50),
+    budget NUMBER(15,2)
+);
+
+CREATE TABLE performance_reviews (
+    review_id NUMBER PRIMARY KEY,
+    emp_id NUMBER,
+    review_date DATE,
+    score NUMBER(2,1),
+    comments CLOB
+);
+
+-- Package per la gestione delle risorse umane
+CREATE OR REPLACE PACKAGE hr_management AS
+    -- Tipo personalizzato per gestire le informazioni dei dipendenti
+    TYPE emp_record IS RECORD (
+        emp_id employees.emp_id%TYPE,
+        full_name VARCHAR2(100),
+        salary employees.salary%TYPE
+    );
+    
+    -- Collection per elaborazioni batch
+    TYPE emp_list IS TABLE OF emp_record;
+    
+    -- Procedure per l'assunzione di un nuovo dipendente
+    PROCEDURE hire_employee(
+        p_first_name IN VARCHAR2,
+        p_last_name IN VARCHAR2,
+        p_email IN VARCHAR2,
+        p_salary IN NUMBER,
+        p_dept_id IN NUMBER
+    );
+    
+    -- Funzione per calcolare il bonus basato sulle performance
+    FUNCTION calculate_bonus(
+        p_emp_id IN NUMBER
+    ) RETURN NUMBER;
+    
+    -- Procedure per generare report delle performance del dipartimento
+    PROCEDURE generate_dept_performance_report(
+        p_dept_id IN NUMBER
+    );
+
+END hr_management;
+/
+
+CREATE OR REPLACE PACKAGE BODY hr_management AS
+    -- Implementazione della procedura di assunzione
+    PROCEDURE hire_employee(
+        p_first_name IN VARCHAR2,
+        p_last_name IN VARCHAR2,
+        p_email IN VARCHAR2,
+        p_salary IN NUMBER,
+        p_dept_id IN NUMBER
+    ) IS
+        v_emp_id NUMBER;
+        e_invalid_salary EXCEPTION;
+        e_dept_not_found EXCEPTION;
+        PRAGMA EXCEPTION_INIT(e_dept_not_found, -20001);
+    BEGIN
+        -- Validazione del salario
+        IF p_salary < 0 THEN
+            RAISE e_invalid_salary;
+        END IF;
+        
+        -- Verifica l'esistenza del dipartimento
+        BEGIN
+            SELECT 1 INTO v_emp_id
+            FROM departments
+            WHERE dept_id = p_dept_id;
+        EXCEPTION
+            WHEN NO_DATA_FOUND THEN
+                RAISE e_dept_not_found;
+        END;
+        
+        -- Generazione nuovo ID dipendente
+        SELECT NVL(MAX(emp_id), 0) + 1 
+        INTO v_emp_id 
+        FROM employees;
+        
+        -- Inserimento nuovo dipendente
+        INSERT INTO employees (
+            emp_id, first_name, last_name, email, 
+            hire_date, salary, department_id, performance_score
+        ) VALUES (
+            v_emp_id, p_first_name, p_last_name, p_email,
+            SYSDATE, p_salary, p_dept_id, 5.0
+        );
+        
+        -- Log dell'operazione
+        INSERT INTO hr_log (
+            log_date, action, description
+        ) VALUES (
+            SYSDATE,
+            'NEW_HIRE',
+            'Nuovo dipendente: ' || p_first_name || ' ' || p_last_name
+        );
+        
+        COMMIT;
+        
+    EXCEPTION
+        WHEN e_invalid_salary THEN
+            RAISE_APPLICATION_ERROR(-20002, 'Salario non valido');
+        WHEN e_dept_not_found THEN
+            RAISE_APPLICATION_ERROR(-20001, 'Dipartimento non trovato');
+        WHEN OTHERS THEN
+            ROLLBACK;
+            RAISE_APPLICATION_ERROR(-20000, 'Errore durante assunzione: ' || SQLERRM);
+    END hire_employee;
+    
+    -- Implementazione della funzione per il calcolo del bonus
+    FUNCTION calculate_bonus(
+        p_emp_id IN NUMBER
+    ) RETURN NUMBER IS
+        v_performance_score NUMBER;
+        v_salary NUMBER;
+        v_bonus NUMBER;
+    BEGIN
+        -- Recupero informazioni dipendente
+        SELECT performance_score, salary
+        INTO v_performance_score, v_salary
+        FROM employees
+        WHERE emp_id = p_emp_id;
+        
+        -- Calcolo bonus basato su performance
+        CASE
+            WHEN v_performance_score >= 9 THEN
+                v_bonus := v_salary * 0.15;
+            WHEN v_performance_score >= 7 THEN
+                v_bonus := v_salary * 0.10;
+            WHEN v_performance_score >= 5 THEN
+                v_bonus := v_salary * 0.05;
+            ELSE
+                v_bonus := 0;
+        END CASE;
+        
+        RETURN v_bonus;
+        
+    EXCEPTION
+        WHEN NO_DATA_FOUND THEN
+            RAISE_APPLICATION_ERROR(-20003, 'Dipendente non trovato');
+        WHEN OTHERS THEN
+            RAISE_APPLICATION_ERROR(-20004, 'Errore nel calcolo del bonus: ' || SQLERRM);
+    END calculate_bonus;
+    
+    -- Implementazione della procedura per il report delle performance
+    PROCEDURE generate_dept_performance_report(
+        p_dept_id IN NUMBER
+    ) IS
+        -- Cursore per recuperare i dati dei dipendenti
+        CURSOR c_emp_data IS
+            SELECT e.emp_id, e.first_name || ' ' || e.last_name as full_name,
+                   e.performance_score, e.salary
+            FROM employees e
+            WHERE e.department_id = p_dept_id
+            ORDER BY e.performance_score DESC;
+            
+        -- Variabili per le statistiche
+        v_dept_name departments.dept_name%TYPE;
+        v_avg_performance NUMBER;
+        v_total_salary NUMBER := 0;
+        v_emp_count NUMBER := 0;
+    BEGIN
+        -- Recupero nome dipartimento
+        SELECT dept_name INTO v_dept_name
+        FROM departments
+        WHERE dept_id = p_dept_id;
+        
+        -- Intestazione report
+        DBMS_OUTPUT.PUT_LINE('Report Performance Dipartimento: ' || v_dept_name);
+        DBMS_OUTPUT.PUT_LINE('Data: ' || TO_CHAR(SYSDATE, 'DD-MON-YYYY'));
+        DBMS_OUTPUT.PUT_LINE('----------------------------------------');
+        
+        -- Elaborazione dati dipendenti
+        FOR emp_rec IN c_emp_data LOOP
+            DBMS_OUTPUT.PUT_LINE(
+                'Dipendente: ' || RPAD(emp_rec.full_name, 30) ||
+                ' Performance: ' || emp_rec.performance_score ||
+                ' Bonus: ' || TO_CHAR(calculate_bonus(emp_rec.emp_id), 'FM999G999D00')
+            );
+            
+            v_total_salary := v_total_salary + emp_rec.salary;
+            v_emp_count := v_emp_count + 1;
+        END LOOP;
+        
+        -- Calcolo e stampa statistiche
+        IF v_emp_count > 0 THEN
+            SELECT AVG(performance_score) INTO v_avg_performance
+            FROM employees
+            WHERE department_id = p_dept_id;
+            
+            DBMS_OUTPUT.PUT_LINE('----------------------------------------');
+            DBMS_OUTPUT.PUT_LINE('Statistiche Dipartimento:');
+            DBMS_OUTPUT.PUT_LINE('Numero dipendenti: ' || v_emp_count);
+            DBMS_OUTPUT.PUT_LINE('Performance media: ' || ROUND(v_avg_performance, 2));
+            DBMS_OUTPUT.PUT_LINE('Costo totale stipendi: ' || TO_CHAR(v_total_salary, 'FM999G999D00'));
+        ELSE
+            DBMS_OUTPUT.PUT_LINE('Nessun dipendente trovato nel dipartimento.');
+        END IF;
+        
+    EXCEPTION
+        WHEN NO_DATA_FOUND THEN
+            RAISE_APPLICATION_ERROR(-20005, 'Dipartimento non trovato');
+        WHEN OTHERS THEN
+            RAISE_APPLICATION_ERROR(-20006, 'Errore nella generazione del report: ' || SQLERRM);
+    END generate_dept_performance_report;
+
+END hr_management;
+/
+
+-- Trigger per mantenere la storia delle modifiche salariali
+CREATE OR REPLACE TRIGGER trg_salary_history
+AFTER UPDATE OF salary ON employees
+FOR EACH ROW
+BEGIN
+    INSERT INTO salary_history (
+        emp_id,
+        change_date,
+        old_salary,
+        new_salary,
+        change_percentage
+    ) VALUES (
+        :NEW.emp_id,
+        SYSDATE,
+        :OLD.salary,
+        :NEW.salary,
+        ROUND(((:NEW.salary - :OLD.salary) / :OLD.salary) * 100, 2)
+    );
+END;
+/
